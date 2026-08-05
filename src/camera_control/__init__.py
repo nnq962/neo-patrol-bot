@@ -7,7 +7,7 @@ from src.camera_control.exceptions import (
     CameraConnectionError,
     CameraControlError,
 )
-from src.camera_control.models import CameraDeviceInfo, PtzPosition
+from src.camera_control.models import CameraDeviceInfo, PtzStatus
 from src.camera_control.ptz_controller import OnvifPtzController
 
 __all__ = [
@@ -18,5 +18,5 @@ __all__ = [
     "CameraDeviceInfo",
     "OnvifCamera",
     "OnvifPtzController",
-    "PtzPosition",
+    "PtzStatus",
 ]

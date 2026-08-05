@@ -64,8 +64,8 @@ class PControllerConfig:
     tilt_gain: float = 0.8
     pan_dead_zone: float = 0.08
     tilt_dead_zone: float = 0.08
-    max_pan_velocity: float = 0.5
-    max_tilt_velocity: float = 0.4
+    max_pan_velocity: float = 0.6
+    max_tilt_velocity: float = 0.5
 
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -124,8 +124,11 @@ class PTrackingController:
         """
         self._validate_input(bbox, frame_width, frame_height)
 
-        error_x = (bbox.center_x - frame_width / 2.0) / (frame_width / 2.0)
-        error_y = (bbox.center_y - frame_height / 2.0) / (frame_height / 2.0)
+        frame_center_x = frame_width / 2.0
+        frame_center_y = frame_height / 2.0
+
+        error_x = (bbox.center_x - frame_center_x) / frame_center_x
+        error_y = (bbox.center_y - frame_center_y) / frame_center_y
 
         pan_velocity = self._proportional_output(
             error=error_x,
@@ -170,8 +173,8 @@ class PTrackingController:
         if abs(error) <= dead_zone:
             return 0.0
 
-        raw_output = gain * error
-        return max(-maximum, min(maximum, raw_output))
+        command_velocity = gain * error
+        return max(-maximum, min(maximum, command_velocity))
 
     # ─────────────────────────────────────────────────────────────────────────
 

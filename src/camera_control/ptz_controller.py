@@ -2,15 +2,24 @@
 
 import math
 from datetime import timedelta
+import time
+from typing import Optional
 
 from onvif import ONVIFClient
 
 from src.camera_control.exceptions import CameraControlError
-from src.camera_control.models import PtzPosition
+from src.camera_control.models import PtzStatus, PtzStatus
 
 MIN_VELOCITY = -1.0
 MAX_VELOCITY = 1.0
 DEFAULT_MOVE_TIMEOUT_SECONDS = 1
+POSITION_DELTA_THRESHOLD = 0.001 # Ngưỡng biến thiên tối thiểu để tính là đang di chuyển
+MIN_PAN_RAW = -1.0
+MAX_PAN_RAW = 1.0
+MIN_TILT_RAW = 0.333
+MAX_TILT_RAW = 1.0
+MIN_ZOOM_RAW = 0.0
+MAX_ZOOM_RAW = 16384.0
 
 
 class OnvifPtzController:
@@ -36,15 +45,26 @@ class OnvifPtzController:
         self._client = client
         self._move_timeout = timedelta(seconds=move_timeout_seconds)
         self._profile_token: str | None = None
+        # Lưu vết tọa độ và thời gian của lần đọc status liền trước
+        self._last_pan: Optional[float] = None
+        self._last_tilt: Optional[float] = None
+        self._last_zoom: Optional[float] = None
+        self._last_status_time: float = 0.0
 
     # ─────────────────────────────────────────────────────────────────────────
 
-    def move_continuous(self, pan_velocity: float, tilt_velocity: float) -> None:
-        """Di chuyển Pan/Tilt với vận tốc chuẩn hóa trong khoảng ``[-1, 1]``.
+    def move_continuous(
+        self,
+        pan_velocity: float = 0.0,
+        tilt_velocity: float = 0.0,
+        zoom_velocity: float = 0.0,
+    ) -> None:
+        """Di chuyển Pan/Tilt/Zoom với vận tốc chuẩn hóa trong khoảng ``[-1, 1]``.
 
         Args:
             pan_velocity: Vận tốc quay ngang, âm sang trái và dương sang phải.
             tilt_velocity: Vận tốc quay dọc, âm đi xuống và dương đi lên.
+            zoom_velocity: Vận tốc phóng to/thu nhỏ, âm zoom out và dương zoom in. Mặc định là 0.0.
 
         Returns:
             Không trả về giá trị.
@@ -55,8 +75,10 @@ class OnvifPtzController:
         """
         self._validate_velocity("pan_velocity", pan_velocity)
         self._validate_velocity("tilt_velocity", tilt_velocity)
+        self._validate_velocity("zoom_velocity", zoom_velocity)
 
-        if pan_velocity == 0.0 and tilt_velocity == 0.0:
+        # Nếu cả 3 vận tốc bằng 0 thì gửi lệnh stop
+        if pan_velocity == 0.0 and tilt_velocity == 0.0 and zoom_velocity == 0.0:
             self.stop()
             return
 
@@ -67,17 +89,24 @@ class OnvifPtzController:
                     "PanTilt": {
                         "x": pan_velocity,
                         "y": tilt_velocity,
-                    }
+                    },
+                    "Zoom": {
+                        "x": zoom_velocity,
+                    },
                 },
                 Timeout=self._move_timeout,
             )
         except Exception as exc:
-            raise CameraControlError(f"Không thể di chuyển Pan/Tilt: {exc}") from exc
+            raise CameraControlError(f"Không thể di chuyển PTZ: {exc}") from exc
 
     # ─────────────────────────────────────────────────────────────────────────
 
-    def stop(self) -> None:
-        """Dừng hai trục Pan/Tilt mà không thay đổi trạng thái Zoom.
+    def stop(self, pan_tilt: bool = True, zoom: bool = True) -> None:
+        """Dừng chuyển động của các trục PTZ (Pan/Tilt/Zoom).
+
+        Args:
+            pan_tilt: Có dừng chuyển động Pan/Tilt hay không. Mặc định là True.
+            zoom: Có dừng chuyển động Zoom hay không. Mặc định là True.
 
         Returns:
             Không trả về giá trị.
@@ -85,44 +114,79 @@ class OnvifPtzController:
         Raises:
             CameraControlError: Khi camera không thực hiện được lệnh dừng.
         """
+        # Nếu cả 2 đều False thì không cần gửi lệnh dừng lên camera
+        if not pan_tilt and not zoom:
+            return
+
         try:
             self._client.ptz().Stop(
                 ProfileToken=self._get_profile_token(),
-                PanTilt=True,
-                Zoom=False,
+                PanTilt=pan_tilt,
+                Zoom=zoom,
             )
         except Exception as exc:
-            raise CameraControlError(f"Không thể dừng Pan/Tilt: {exc}") from exc
+            raise CameraControlError(f"Không thể dừng chuyển động PTZ: {exc}") from exc
 
     # ─────────────────────────────────────────────────────────────────────────
 
-    def get_position(self) -> PtzPosition:
-        """Đọc vị trí Pan/Tilt hiện tại từ PTZ status của camera.
+    def get_status(self) -> PtzStatus:
+        """Đọc đầy đủ trạng thái PTZ (Pan/Tilt/Zoom và trạng thái di chuyển) hiện tại từ camera.
 
         Returns:
-            Vị trí Pan/Tilt trong coordinate space do camera cung cấp.
+            Đối tượng PtzStatus chứa các thông số Pan, Tilt, Zoom và MoveStatus.
 
         Raises:
-            CameraControlError: Khi camera không trả về được vị trí Pan/Tilt.
+            CameraControlError: Khi camera không trả về được trạng thái PTZ.
         """
         try:
-            status = self._client.ptz().GetStatus(
+            # 1. Gọi lệnh ONVIF lấy raw status từ camera
+            raw_status = self._client.ptz().GetStatus(
                 ProfileToken=self._get_profile_token()
             )
-            position = getattr(status, "Position", None)
-            pan_tilt = getattr(position, "PanTilt", None)
-            if pan_tilt is None:
-                raise CameraControlError("Camera không trả về vị trí Pan/Tilt")
+            
+            current_time = time.time()
+            
+            # Extracted coordinates
+            pan = float(raw_status.Position.PanTilt.x) if raw_status.Position and raw_status.Position.PanTilt else 0.0
+            tilt = float(raw_status.Position.PanTilt.y) if raw_status.Position and raw_status.Position.PanTilt else 0.0
+            zoom = float(raw_status.Position.Zoom.x) if raw_status.Position and raw_status.Position.Zoom else 0.0
 
-            return PtzPosition(
-                pan=float(getattr(pan_tilt, "x")),
-                tilt=float(getattr(pan_tilt, "y")),
+            # 2. Logic tự xác định Pan/Tilt Moving
+            is_pan_tilt_moving = False
+            if self._last_pan is not None and self._last_tilt is not None:
+                delta_pan = abs(pan - self._last_pan)
+                delta_tilt = abs(tilt - self._last_tilt)
+                
+                if delta_pan > POSITION_DELTA_THRESHOLD or delta_tilt > POSITION_DELTA_THRESHOLD:
+                    is_pan_tilt_moving = True
+
+            # 3. Logic tự xác định Zoom Moving
+            is_zoom_moving = False
+            if self._last_zoom is not None:
+                delta_zoom = abs(zoom - self._last_zoom)
+                if delta_zoom > POSITION_DELTA_THRESHOLD:
+                    is_zoom_moving = True
+
+            # 4. Cập nhật cache cho lần gọi kế tiếp
+            self._last_pan = pan
+            self._last_tilt = tilt
+            self._last_zoom = zoom
+            self._last_status_time = current_time
+
+            # 5. Trả về PtzStatus dataclass
+            return PtzStatus(
+                pan=pan,
+                tilt=tilt,
+                zoom=zoom,
+                is_pan_tilt_moving=is_pan_tilt_moving,
+                is_zoom_moving=is_zoom_moving,
             )
+
         except CameraControlError:
             raise
         except Exception as exc:
             raise CameraControlError(
-                f"Không thể đọc vị trí Pan/Tilt: {exc}"
+                f"Không thể đọc trạng thái PTZ: {exc}"
             ) from exc
 
     # ─────────────────────────────────────────────────────────────────────────

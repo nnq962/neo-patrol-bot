@@ -7,16 +7,19 @@ from dataclasses import dataclass
 class CameraDeviceInfo:
     """Mô tả thông tin nhận dạng cơ bản do camera ONVIF trả về."""
 
-    manufacturer: str
-    model: str
+    manufacturer    : str
+    model           : str
     firmware_version: str
-    serial_number: str
-    hardware_id: str
+    serial_number   : str
+    hardware_id     : str
 
 
 @dataclass(frozen=True, slots=True)
-class PtzPosition:
-    """Mô tả vị trí Pan/Tilt hiện tại do camera ONVIF trả về."""
+class PtzStatus:
+    """Mô tả chi tiết trạng thái PTZ hiện tại do camera ONVIF trả về."""
 
-    pan: float
-    tilt: float
+    pan               : float
+    tilt              : float
+    zoom              : float
+    is_pan_tilt_moving: bool = False
+    is_zoom_moving    : bool = False
