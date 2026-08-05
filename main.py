@@ -1,7 +1,8 @@
-"""Chạy thử nghiệm camera PTZ bám theo bounding box khuôn mặt."""
+"""Chạy thử nghiệm camera PTZ bám theo bounding box bàn tay hoặc khuôn mặt."""
 
 from __future__ import annotations
 
+import argparse
 import threading
 import time
 from dataclasses import dataclass
@@ -20,14 +21,14 @@ from src.media_sources import MediaSourceError, MediaSources
 from src.tracking import (
     BoundingBox,
     FaceDetector,
+    HandDetector,
     PControllerConfig,
     PTrackingController,
     PanTiltCommand,
 )
 from utils import LOGGER
 
-WINDOW_NAME = "Neo Patrol Bot - Face Tracking"
-CONTROL_INTERVAL_SECONDS = 0.10
+CONTROL_INTERVAL_SECONDS = 0.15
 TARGET_LOST_TIMEOUT_SECONDS = 0.25
 
 
@@ -180,14 +181,51 @@ class PTZCommandWorker:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def parse_args() -> argparse.Namespace:
+    """Đọc và xử lý các tham số dòng lệnh.
+
+    Returns:
+        Namespace chứa các tham số dòng lệnh đã parse.
+    """
+    parser = argparse.ArgumentParser(
+        description="Neo Patrol Bot - Camera PTZ bám theo đối tượng (hand/face)",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--mode",
+        choices=["hand", "face"],
+        default="hand",
+        help="Chế độ tracking: hand (bàn tay) hoặc face (khuôn mặt). Mặc định là hand.",
+    )
+    group.add_argument(
+        "--face",
+        action="store_const",
+        dest="mode",
+        const="face",
+        help="Bật chế độ tracking khuôn mặt",
+    )
+    group.add_argument(
+        "--hand",
+        action="store_const",
+        dest="mode",
+        const="hand",
+        help="Bật chế độ tracking bàn tay (mặc định)",
+    )
+    return parser.parse_args()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 def main() -> int:
-    """Kết nối camera và chạy vòng lặp phát hiện, bám theo khuôn mặt."""
+    """Kết nối camera và chạy vòng lặp phát hiện, bám theo đối tượng theo mode."""
+    args = parse_args()
     try:
         config = CameraConfig.from_env()
         camera = _connect_camera(config)
-        _run_face_tracking(camera, config)
+        _run_tracking(camera, config, mode=args.mode)
     except KeyboardInterrupt:
-        LOGGER.info("Đã dừng face tracking bằng bàn phím")
+        LOGGER.info("Đã dừng %s tracking bằng bàn phím", args.mode)
         return 0
     except (
         CameraConfigError,
@@ -197,7 +235,7 @@ def main() -> int:
         FileNotFoundError,
         RuntimeError,
     ) as exc:
-        LOGGER.error("Face tracking thất bại: %s", exc)
+        LOGGER.error("%s tracking thất bại: %s", args.mode.capitalize(), exc)
         return 1
 
     return 0
@@ -223,22 +261,37 @@ def _connect_camera(config: CameraConfig) -> OnvifCamera:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _run_face_tracking(camera: OnvifCamera, config: CameraConfig) -> None:
-    """Đọc RTSP, phát hiện khuôn mặt và cập nhật command cho PTZ worker."""
+def _run_tracking(
+    camera: OnvifCamera,
+    config: CameraConfig,
+    mode: str,
+) -> None:
+    """Đọc RTSP, phát hiện đối tượng (hand/face) và cập nhật command cho PTZ worker.
+
+    Args:
+        camera: Đối tượng camera ONVIF đã kết nối.
+        config: Cấu hình kết nối camera và RTSP stream.
+        mode: Chế độ tracking ('hand' hoặc 'face').
+    """
     controller_config = PControllerConfig()
     controller = PTrackingController(controller_config)
     ptz_worker = PTZCommandWorker(camera)
     ptz_worker.start()
 
-    face_was_detected = False
+    target_name = "bàn tay" if mode == "hand" else "khuôn mặt"
+    target_label = "HAND" if mode == "hand" else "FACE"
+    window_name = f"Neo Patrol Bot - {mode.capitalize()} Tracking"
+    detector_cls = HandDetector if mode == "hand" else FaceDetector
+
+    target_was_detected = False
     stop_command_submitted = False
     last_control_time = 0.0
     last_detection_time: float | None = None
 
-    LOGGER.info("Bắt đầu face tracking; nhấn Q hoặc ESC để dừng")
+    LOGGER.info("Bắt đầu %s tracking; nhấn Q hoặc ESC để dừng", mode)
 
     try:
-        with FaceDetector() as detector, MediaSources(config.rtsp_url) as media:
+        with detector_cls() as detector, MediaSources(config.rtsp_url) as media:
             for frames, _ in media:
                 frame = frames[0]
                 bbox = detector.detect(frame)
@@ -249,9 +302,9 @@ def _run_face_tracking(camera: OnvifCamera, config: CameraConfig) -> None:
                     last_detection_time = now
                     stop_command_submitted = False
 
-                    if not face_was_detected:
-                        LOGGER.info("Đã phát hiện khuôn mặt")
-                    face_was_detected = True
+                    if not target_was_detected:
+                        LOGGER.info("Đã phát hiện %s", target_name)
+                    target_was_detected = True
 
                     if now - last_control_time >= CONTROL_INTERVAL_SECONDS:
                         ptz_worker.submit(command)
@@ -263,16 +316,22 @@ def _run_face_tracking(camera: OnvifCamera, config: CameraConfig) -> None:
                     )
 
                     if target_is_lost:
-                        if face_was_detected:
-                            LOGGER.info("Mất dấu khuôn mặt; dừng Pan/Tilt")
-                        face_was_detected = False
+                        if target_was_detected:
+                            LOGGER.info("Mất dấu %s; dừng Pan/Tilt", target_name)
+                        target_was_detected = False
 
                         if not stop_command_submitted:
                             ptz_worker.submit(None)
                             stop_command_submitted = True
 
-                _draw_overlay(frame, bbox, command, controller_config)
-                cv2.imshow(WINDOW_NAME, frame)
+                _draw_overlay(
+                    frame=frame,
+                    bbox=bbox,
+                    command=command,
+                    config=controller_config,
+                    target_label=target_label,
+                )
+                cv2.imshow(window_name, frame)
 
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), 27):
@@ -291,7 +350,7 @@ def _calculate_command(
     bbox: BoundingBox | None,
     frame: np.ndarray,
 ) -> PanTiltCommand | None:
-    """Tính command P từ bbox nếu phát hiện được khuôn mặt."""
+    """Tính command P từ bbox nếu phát hiện được đối tượng."""
     if bbox is None:
         return None
 
@@ -307,8 +366,17 @@ def _draw_overlay(
     bbox: BoundingBox | None,
     command: PanTiltCommand | None,
     config: PControllerConfig,
+    target_label: str,
 ) -> None:
-    """Vẽ bbox, tâm ảnh, dead zone và vận tốc lên frame preview."""
+    """Vẽ bbox, tâm ảnh, dead zone và vận tốc lên frame preview.
+
+    Args:
+        frame: Frame hình ảnh từ camera.
+        bbox: Bounding box đối tượng nếu phát hiện được.
+        command: Lệnh PTZ vận tốc tính toán được.
+        config: Cấu hình bộ điều khiển P.
+        target_label: Nhãn hiển thị khi mất dấu đối tượng (ví dụ 'HAND' hoặc 'FACE').
+    """
     frame_height, frame_width = frame.shape[:2]
     center_x = frame_width // 2
     center_y = frame_height // 2
@@ -334,7 +402,7 @@ def _draw_overlay(
     if bbox is None or command is None:
         cv2.putText(
             frame,
-            "FACE: LOST",
+            f"{target_label}: LOST",
             (20, frame_height - 20),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
