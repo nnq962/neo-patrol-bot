@@ -6,12 +6,15 @@ from src.tracking.controller import (
     PTrackingController,
     PanTiltCommand,
 )
+from src.tracking.face_detector import FaceDetector
 from src.tracking.hand_detector import HandDetector
 
 __all__ = [
     "BoundingBox",
+    "FaceDetector",
     "HandDetector",
     "PControllerConfig",
     "PTrackingController",
     "PanTiltCommand",
 ]
+

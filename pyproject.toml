@@ -12,6 +12,7 @@ dependencies = [
     "opencv-python",
     "python-dotenv>=1.2.2",
     "pytz>=2026.3.post1",
+    "ultralytics>=8.4.115",
     "yt-dlp>=2026.7.4",
 ]
 

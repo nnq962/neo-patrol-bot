@@ -60,7 +60,7 @@ class PanTiltCommand:
 class PControllerConfig:
     """Lưu hệ số và giới hạn của bộ điều khiển P hai trục."""
 
-    pan_gain: float = 0.8
+    pan_gain: float = 0.6
     tilt_gain: float = 0.8
     pan_dead_zone: float = 0.08
     tilt_dead_zone: float = 0.08
